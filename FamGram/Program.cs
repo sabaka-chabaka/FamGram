@@ -1,41 +1,63 @@
+using FamGram.Data;
+using FamGram.Services;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
+builder.Services.AddDbContext<AppDbContext>(opt =>
+    opt.UseSqlite(builder.Configuration.GetConnectionString("Default") ?? "Data Source=famgram.db"));
+
+builder.Services.AddScoped<AuthService>();
+builder.Services.AddScoped<ChatService>();
+builder.Services.AddScoped<MessageService>();
+builder.Services.AddScoped<EncryptionService>();
+
+var jwtKey = builder.Configuration["Jwt:Key"] ?? "famgram-super-secret-key-min-32-chars!!";
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
+            ValidateIssuer = false,
+            ValidateAudience = false
+        };
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = ctx =>
+            {
+                var accessToken = ctx.Request.Query["access_token"];
+                var path = ctx.HttpContext.Request.Path;
+                if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs"))
+                    ctx.Token = accessToken;
+                return Task.CompletedTask;
+            }
+        };
+    });
+
+builder.Services.AddAuthorization();
+builder.Services.AddSignalR();
+builder.Services.AddControllers();
+
+builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
+    p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+using (var scope = app.Services.CreateScope())
 {
-    app.MapOpenApi();
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    db.Database.EnsureCreated();
 }
 
-app.UseHttpsRedirection();
-
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
-
-app.MapGet("/weatherforecast", () =>
-    {
-        var forecast = Enumerable.Range(1, 5).Select(index =>
-                new WeatherForecast
-                (
-                    DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-                    Random.Shared.Next(-20, 55),
-                    summaries[Random.Shared.Next(summaries.Length)]
-                ))
-            .ToArray();
-        return forecast;
-    })
-    .WithName("GetWeatherForecast");
+app.UseCors();
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapControllers();
+app.MapHub<ChatHub>("/hubs/chat");
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
