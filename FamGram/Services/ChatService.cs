@@ -62,13 +62,62 @@ public class ChatService(AppDbContext db, EncryptionService enc)
     public async Task<List<ChatDto>> GetUserChatsAsync(int userId)
     {
         var chats = await db.Chats
-            .Include(c => c.Members).ThenInclude(m => m.User)
-            .Include(c => c.Messages.OrderByDescending(m => m.SentAt).Take(1))
-            .ThenInclude(m => m.Sender)
+            .Include(c => c.Members)
+            .ThenInclude(m => m.User)
             .Where(c => c.Members.Any(m => m.UserId == userId))
-            .OrderByDescending(c => c.Messages.Max(m => (DateTime?)m.SentAt) ?? c.CreatedAt)
             .ToListAsync();
- 
+
+        var chatIds = chats.Select(c => c.Id).ToList();
+
+        var lastMessages = await db.Messages
+            .Where(m => chatIds.Contains(m.ChatId))
+            .GroupBy(m => m.ChatId)
+            .Select(g => g
+                .OrderByDescending(m => m.SentAt)
+                .FirstOrDefault())
+            .ToListAsync();
+
+        var senderIds = lastMessages
+            .Where(m => m != null)
+            .Select(m => m.SenderId)
+            .Distinct()
+            .ToList();
+
+        var senders = await db.Users
+            .Where(u => senderIds.Contains(u.Id))
+            .ToDictionaryAsync(u => u.Id);
+
+        foreach (var msg in lastMessages)
+        {
+            if (msg != null && senders.TryGetValue(msg.SenderId, out var sender))
+            {
+                msg.Sender = sender;
+            }
+        }
+
+        var lastMessageDict = lastMessages
+            .Where(m => m != null)
+            .ToDictionary(m => m.ChatId, m => m);
+
+        foreach (var chat in chats)
+        {
+            if (lastMessageDict.TryGetValue(chat.Id, out var msg))
+            {
+                chat.Messages = new List<Message> { msg };
+            }
+            else
+            {
+                chat.Messages = new List<Message>();
+            }
+        }
+
+        chats = chats
+            .OrderByDescending(c =>
+                lastMessageDict.ContainsKey(c.Id)
+                    ? lastMessageDict[c.Id].SentAt
+                    : c.CreatedAt)
+            .ToList();
+
         return chats.Select(c => ToDto(c, userId, enc)).ToList();
     }
     
